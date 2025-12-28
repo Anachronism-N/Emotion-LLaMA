@@ -33,11 +33,15 @@ class FirstfaceCaptionBuilder(BaseDatasetBuilder):
         # create datasets
         # [NOTE] return inner_datasets (wds.DataPipeline)
         dataset_cls = self.train_dataset_cls
+        au_feature_dir = build_info.get("au_feature_dir", "openface_au_23_UTT")
+        modality_dropout_prob = build_info.get("modality_dropout_prob", 0.0)
         datasets[split] = dataset_cls(
             vis_processor=self.vis_processors[split],
             text_processor=self.text_processors[split],
             ann_path=build_info.ann_path,
             vis_root=build_info.image_path,
+            au_feature_dir=au_feature_dir,
+            modality_dropout_prob=modality_dropout_prob,
         )
 
         return datasets 

@@ -79,6 +79,9 @@ class MiniGPTv2(MiniGPTBase):
         self.feats_llama_proj3 = nn.Linear(
             1024, self.llama_model.config.hidden_size
         )
+        self.feats_llama_proj4 = nn.Linear(
+            1024, self.llama_model.config.hidden_size
+        )
         
         self.cls_tk_llama_proj = nn.Linear(
             1408, self.llama_model.config.hidden_size
@@ -103,12 +106,24 @@ class MiniGPTv2(MiniGPTBase):
             bs, pn, hs = image_embeds.shape             
             image_embeds = image_embeds.view(bs, int(pn / 4), int(hs * 4))  # [1, 256, 5632]
             image_inputs_llama = self.llama_proj(image_embeds)    # [1, 256, 4096]
-            video_features = video_features.to(device)   # [1, 3, 1024]
+            video_features = video_features.to(device)
+            num_modalities = video_features.size(1)
             video_features_split = torch.split(video_features, 1, dim=1)
-            output1 = self.feats_llama_proj1(video_features_split[0].squeeze(1))
-            output2 = self.feats_llama_proj2(video_features_split[1].squeeze(1))
-            output3 = self.feats_llama_proj3(video_features_split[2].squeeze(1))      
-            video_feats = torch.stack([output1, output2, output3], dim=1)
+            proj_layers = [
+                self.feats_llama_proj1,
+                self.feats_llama_proj2,
+                self.feats_llama_proj3,
+            ]
+            if num_modalities == 4:
+                proj_layers.append(self.feats_llama_proj4)
+            if num_modalities > len(proj_layers):
+                raise ValueError(f"Unsupported video feature count: {num_modalities}")
+            projected_feats = []
+            for idx, feats in enumerate(video_features_split):
+                if idx >= len(proj_layers):
+                    break
+                projected_feats.append(proj_layers[idx](feats.squeeze(1)))
+            video_feats = torch.stack(projected_feats, dim=1)
             inputs_llama = torch.cat((image_inputs_llama, video_feats, cls_tk_feats), dim=1) # cls_tk_feats
             # inputs_llama = torch.cat((image_inputs_llama, video_feats), dim=1)
 
