@@ -5,6 +5,7 @@ import pickle
 import random
 import time
 import itertools
+import warnings
 import pandas as pd
 import json
 from copy import deepcopy
@@ -25,7 +26,15 @@ import cv2
     
 
 class MER2024Dataset(Dataset):
-    def __init__(self, vis_processor, text_processor, vis_root, ann_path):
+    def __init__(
+        self,
+        vis_processor,
+        text_processor,
+        vis_root,
+        ann_path,
+        au_feature_dir="openface_au_23_UTT",
+        modality_dropout_prob=0.0,
+    ):
 
         self.vis_root = vis_root
 
@@ -48,6 +57,11 @@ class MER2024Dataset(Dataset):
         print("ann_path: ", ann_path)
         self.ann_path = ann_path
         self.file_path = os.path.dirname(ann_path)
+        self.au_feature_dir = au_feature_dir
+        self.include_au = bool(au_feature_dir)
+        self._warned_missing_au = False
+        self._warned_au_dim = False
+        self.modality_dropout_prob = modality_dropout_prob
         self.tmp = [x.strip().split(' ') for x in open(ann_path)]
         print(('video number:%d' % (len(self.tmp))))
 
@@ -84,14 +98,21 @@ class MER2024Dataset(Dataset):
         # image = Image.open(image_path).convert("RGB")
         # image = self.vis_processor(image)
 
-        FaceMAE_feats, VideoMAE_feats, Audio_feats = self.get(video_name)
+        FaceMAE_feats, VideoMAE_feats, Audio_feats, AU_feats = self.get(video_name)
         if len(VideoMAE_feats.shape) == 1:
             VideoMAE_feats = VideoMAE_feats.unsqueeze(0)
         if len(Audio_feats.shape) == 1:
             Audio_feats = Audio_feats.unsqueeze(0)
         if len(FaceMAE_feats.shape) == 1:
             FaceMAE_feats = FaceMAE_feats.unsqueeze(0)
-        video_features = torch.cat((FaceMAE_feats, VideoMAE_feats, Audio_feats), dim=0)
+        if AU_feats is not None:
+            if len(AU_feats.shape) == 1:
+                AU_feats = AU_feats.unsqueeze(0)
+            feature_tensors = (FaceMAE_feats, VideoMAE_feats, Audio_feats, AU_feats)
+        else:
+            feature_tensors = (FaceMAE_feats, VideoMAE_feats, Audio_feats)
+        video_features = torch.cat(feature_tensors, dim=0)
+        video_features, modality_mask = self.apply_modality_dropout(video_features)
 
         # random task
         task = random.choice(self.task_pool)
@@ -110,6 +131,7 @@ class MER2024Dataset(Dataset):
         return {
             "image": image,
             "video_features": video_features,
+            "modality_mask": modality_mask,
             "instruction_input": instruction,
             "answer": caption,
             "emotion": emotion,
@@ -142,4 +164,51 @@ class MER2024Dataset(Dataset):
         Audio_feats_path = os.path.join(self.file_path, 'HL_23_UTT', video_name + '.npy')
         Audio_feats = torch.tensor(np.load(Audio_feats_path))
 
-        return FaceMAE_feats, VideoMAE_feats, Audio_feats
+        # AU feature (optional)
+        AU_feats = None
+        if self.include_au:
+            au_feats_path = os.path.join(self.file_path, self.au_feature_dir, video_name + '.npy')
+            if os.path.exists(au_feats_path):
+                AU_feats = torch.tensor(np.load(au_feats_path))
+                AU_feats = self._align_au_dim(AU_feats, Audio_feats)
+            else:
+                AU_feats = torch.zeros_like(Audio_feats)
+                if not self._warned_missing_au:
+                    warnings.warn(
+                        f"AU feature file missing at {au_feats_path}; using zeros as fallback."
+                    )
+                    self._warned_missing_au = True
+
+        return FaceMAE_feats, VideoMAE_feats, Audio_feats, AU_feats
+
+    def _align_au_dim(self, au_feats, audio_feats):
+        au_dim = au_feats.shape[-1]
+        audio_dim = audio_feats.shape[-1]
+        if au_dim == audio_dim:
+            return au_feats
+        if not self._warned_au_dim:
+            warnings.warn(
+                f"AU feature dim {au_dim} does not match audio dim {audio_dim}; "
+                "padding/truncating to match."
+            )
+            self._warned_au_dim = True
+        if au_dim > audio_dim:
+            return au_feats[..., :audio_dim]
+        pad_size = audio_dim - au_dim
+        return F.pad(au_feats, (0, pad_size))
+
+    def apply_modality_dropout(self, video_features):
+        num_modalities = video_features.size(0)
+        modality_mask = torch.ones(num_modalities, dtype=video_features.dtype)
+        if self.modality_dropout_prob <= 0:
+            return video_features, modality_mask
+        dropped = []
+        for idx in range(num_modalities):
+            if random.random() < self.modality_dropout_prob:
+                dropped.append(idx)
+        if len(dropped) == num_modalities:
+            dropped.pop(random.randrange(num_modalities))
+        if dropped:
+            modality_mask[dropped] = 0
+        video_features = video_features * modality_mask[:, None]
+        return video_features, modality_mask
