@@ -1,0 +1,11 @@
+datasets:
+  hero_dataset: # name of the dataset builder
+    data_type: images # Standard key, maps to vis_root logic in Builder
+    build_info:
+      annotation:
+        ann_path: "datasets/MER2024/labels.json"
+      images:
+        storage: "datasets/MER2024/features/"
+      
+      # Optional params
+      modality_dropout_prob: 0.1

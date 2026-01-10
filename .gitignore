@@ -51,8 +51,8 @@ checkpoints/save_checkpoint/*.pth
 checkpoints/save_checkpoint/*.pt
 !checkpoints/.gitkeep
 
-# Dataset files (too large for git)
-datasets/
+# Dataset files (too large for git) - only ignore top-level datasets folder
+/datasets/
 *.mp4
 *.avi
 *.mov

@@ -47,3 +47,34 @@
 - **改动**：
   - 数据集新增 `modality_dropout_prob`，按概率随机屏蔽模态特征。
   - 返回 `modality_mask` 以便后续在模型或损失中使用。
+
+### 7. Phase 1 & 2 Completed: HERO Core Modules
+- **Date**: 2026-01-09
+- **Implemented**:
+  - **Observation Expert Layer**: 5 experts (Visual, Video, Audio, AU, Synergy) with `ModalityQFormer`.
+  - **Evidence Integration Layer**: `GlobalQueryGenerator` + `PanoramicGuidedAttention` + `ModalityDropoutTrainer`.
+  - **HEROModel**: New model class integrating these layers with backward compatibility.
+- **Verification**:
+  - Validated with unit tests `tests/test_hero_modules.py`.
+  - Confirmed 3D tensor shapes for Q-Former input.
+  - Estimated memory usage (~990MB for HERO specific modules).
+
+### 8. Phase 3 Completed: Hierarchical Reasoning Layer
+- **Date**: 2026-01-09
+- **Implemented**:
+  - **CoT Prompt Design**: Integrated structured prompt template into `HEROModel`.
+  - **Reasoning Flow**: Updated `generate` method to wrap prompts and optionally parse output.
+  - **Output Parser**: Added robust JSON parsing logic to extract `evidence`, `rationale`, and `prediction`.
+- **Verification**:
+  - Validated with unit tests `tests/test_cot.py`.
+
+### 9. Phase 4 Completed: Feature-Only Training Pipeline
+- **Date**: 2026-01-10
+- **Implemented**: 
+    - **Extraction Pipeline**: `extract_features.py` converts videos to unified `.npy` dictionaries.
+    - **Dataset Loader**: `HERODataset` handles padded stacking of multi-modal features.
+    - **Model Optimization**: `HEROModel` updated for dynamic slicing of feature inputs (1024/768 dims).
+    - **Loss Integration**: `STMIL` and `SCCL` integrated into training forward pass.
+- **Verification**: 
+    - `test_dataset_loading.py`: Success.
+    - `test_hero_refactor.py`: Success.

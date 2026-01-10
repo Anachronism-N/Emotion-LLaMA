@@ -1,0 +1,66 @@
+# HERO Model Configuration
+# 面向多模态情感理解的分层式证据推理与观察框架
+
+model:
+  arch: hero
+  
+  # Vision Encoder
+  vit_model: "eva_clip_g"
+  image_size: 448
+  drop_path_rate: 0
+  use_grad_checkpoint: False
+  vit_precision: "fp16"
+  freeze_vit: True
+  
+  # LLM
+  llama_model: "checkpoints/Llama-2-7b-chat-hf"
+  
+  # LoRA
+  lora_r: 64
+  lora_alpha: 16
+  
+  # Context
+  max_txt_len: 300
+  max_context_len: 3800
+  end_sym: "\n"
+  prompt_template: "[INST] {} [/INST]"
+  
+  # HERO specific configuration
+  hero:
+    # Feature dimensions (from encoders)
+    visual_dim: 1408    # EVA ViT feature dim
+    video_dim: 1024     # VideoMAE feature dim
+    audio_dim: 1024     # HuBERT feature dim
+    au_dim: 1024        # OpenFace AU feature dim
+    
+    # Q-Former configuration
+    hidden_dim: 768      # Q-Former hidden dimension
+    num_queries: 32      # Number of learnable queries per modality
+    num_qformer_layers: 2  # Number of Q-Former layers
+    
+    # Integration Layer
+    num_output_queries: 64  # Number of output tokens for LLM
+    
+    # Synergy Expert
+    include_synergy: True   # Enable audio-visual conflict detection
+    
+    # Module switches (for ablation studies)
+    use_observation_experts: True
+    use_integration_layer: True
+
+  # Checkpoint (optional)
+  # ckpt: "checkpoints/save_checkpoint/hero_stage1.pth"
+
+preprocess:
+  vis_processor:
+    train:
+      name: "blip2_image_train"
+      image_size: 448
+    eval:
+      name: "blip2_image_eval"
+      image_size: 448
+  text_processor:
+    train:
+      name: "blip_caption"
+    eval:
+      name: "blip_caption"

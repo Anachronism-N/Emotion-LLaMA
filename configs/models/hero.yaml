@@ -1,0 +1,52 @@
+model:
+  arch: hero
+  model_type: pretrain_vicuna
+  load_finetuned: False
+  
+  # Image Encoder
+  vit_model: "eva_clip_g"
+  image_size: 224
+  drop_path_rate: 0
+  use_grad_checkpoint: False
+  vit_precision: "fp16"
+  freeze_vit: True
+  
+  # LLM
+  llama_model: "/commondocument/group2/vicuna-7b-v1.5" 
+  
+  # HERO Specific
+  hero:
+    visual_dim: 1024 # CLIP-Large
+    video_dim: 768   # VideoMAE-Base
+    audio_dim: 1024  # HuBERT-Large
+    au_dim: 1024     # OpenFace (Aligned)
+    text_dim: 768    # BERT-Base
+    hidden_dim: 768
+    num_queries: 32
+    num_qformer_layers: 2
+    num_output_queries: 64
+    include_synergy: True
+    use_observation_experts: True
+    use_integration_layer: True
+    lambda_stmil: 0.1
+    lambda_sccl: 0.1
+
+  # LoRA
+  lora_r: 64
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "v_proj"]
+
+preprocess:
+  vis_processor:
+    train:
+      name: "blip2_image_train"
+      image_size: 224
+    eval:
+      name: "blip2_image_eval"
+      image_size: 224
+  text_processor:
+    train:
+      name: "blip_caption"
+    eval:
+      name: "blip_caption"
