@@ -30,14 +30,24 @@ class IntegrationOutput:
     modality_importance: Dict[str, torch.Tensor]  # Per-modality attention scores
 
 
-class AudioGuidedQueryGenerator(nn.Module):
+class AdaptiveQueryGenerator(nn.Module):
     """
-    Audio-Guided Query Generator (Implements 'Audio Anchoring').
+    Adaptive Query Generator for Evidence Integration.
     
-    Instead of a flat self-attention over all summaries, this module uses 
-    Audio summary as the primary 'Anchor' query to attend to other modalities.
-    This aligns with the idea that audio leaks the most 'truthful' emotion.
+    Supports multiple fusion strategies to generate a global_query from expert summaries:
+    - 'dynamic': Dynamic Anchoring via gated scoring and self-attention refinement.
+    - 'audio': Legacy Audio Anchoring (audio as sole query source).
+    - 'concat': Baseline concatenation followed by MLP projection.
+    
+    Args:
+        hidden_dim: Dimension of expert summary vectors.
+        num_heads: Number of attention heads (for 'dynamic' and 'audio' modes).
+        max_experts: Maximum number of expert modalities.
+        dropout: Dropout probability.
+        strategy: Fusion strategy ('dynamic', 'audio', 'concat').
     """
+    
+    SUPPORTED_STRATEGIES = ('dynamic', 'audio', 'concat')
     
     def __init__(
         self,
@@ -45,72 +55,181 @@ class AudioGuidedQueryGenerator(nn.Module):
         num_heads: int = 8,
         max_experts: int = 6,
         dropout: float = 0.1,
+        strategy: str = 'dynamic',
     ):
         super().__init__()
         
+        if strategy not in self.SUPPORTED_STRATEGIES:
+            raise ValueError(f"Strategy must be one of {self.SUPPORTED_STRATEGIES}, got '{strategy}'")
+        
         self.hidden_dim = hidden_dim
+        self.max_experts = max_experts
+        self.strategy = strategy
         
-        # Audio serves as Query
-        # Visual/Text/AU etc. serve as Key/Value
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        
-        self.ln = nn.LayerNorm(hidden_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 4, hidden_dim),
-            nn.Dropout(dropout),
-        )
-        self.output_ln = nn.LayerNorm(hidden_dim)
-        
+        # ========== Strategy: Dynamic ==========
+        if strategy == 'dynamic':
+            # Scorer: Linear -> Tanh -> Linear (produces per-modality confidence)
+            self.scorer = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.Tanh(),
+                nn.Linear(hidden_dim // 2, 1),
+            )
+            # Refinement Self-Attention (Hybrid Anchor attends to all summaries)
+            self.refine_attn = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.refine_ln = nn.LayerNorm(hidden_dim)
+            self.refine_ffn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 4),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 4, hidden_dim),
+                nn.Dropout(dropout),
+            )
+            self.output_ln = nn.LayerNorm(hidden_dim)
+            
+        # ========== Strategy: Audio (Legacy) ==========
+        elif strategy == 'audio':
+            self.cross_attn = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.ln = nn.LayerNorm(hidden_dim)
+            self.ffn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 4),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 4, hidden_dim),
+                nn.Dropout(dropout),
+            )
+            self.output_ln = nn.LayerNorm(hidden_dim)
+            
+        # ========== Strategy: Concat (Baseline) ==========
+        elif strategy == 'concat':
+            self.concat_proj = nn.Sequential(
+                nn.Linear(hidden_dim * max_experts, hidden_dim * 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+            )
+            self.output_ln = nn.LayerNorm(hidden_dim)
+
     def forward(
         self,
         summary_vectors: torch.Tensor,
-        audio_idx: int,
         modality_mask: Optional[torch.Tensor] = None,
+        audio_idx: int = 2,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
+        Generate global_query from expert summary vectors.
+        
         Args:
-            summary_vectors: [B, num_experts, H]
-            audio_idx: Index of the audio expert in the summary vectors
+            summary_vectors: [B, Num_Experts, Hidden_Dim]
+            modality_mask: [B, Num_Experts] (1=present, 0=missing)
+            audio_idx: Index of audio expert (only used in 'audio' mode)
+            
+        Returns:
+            global_query: [B, Hidden_Dim]
+            attention_weights: [B, Num_Experts] (modality importance scores)
         """
-        # Extract Audio Anchor
-        audio_anchor = summary_vectors[:, audio_idx:audio_idx+1, :] # [B, 1, H]
+        batch_size, num_experts, _ = summary_vectors.shape
+        device = summary_vectors.device
         
-        # Others (including audio itself is fine, or exclude it? usually keep it for self-reinforcement)
-        evidence_bank = summary_vectors # [B, N, H]
+        # Default mask: all modalities present
+        if modality_mask is None:
+            modality_mask = torch.ones(batch_size, num_experts, device=device)
         
-        key_padding_mask = None
-        if modality_mask is not None:
-             key_padding_mask = (modality_mask == 0)
-
-        # Audio 'interrogates' the evidence bank
-        attn_out, attn_weights = self.cross_attn(
-            query=audio_anchor,
-            key=evidence_bank,
-            value=evidence_bank,
-            key_padding_mask=key_padding_mask
-        )
+        # ==================== DYNAMIC ====================
+        if self.strategy == 'dynamic':
+            # 1. Score each modality
+            scores = self.scorer(summary_vectors).squeeze(-1)  # [B, N]
+            
+            # 2. Mask missing modalities with -inf before softmax
+            masked_scores = scores.masked_fill(modality_mask == 0, float('-inf'))
+            
+            # 3. Softmax to get attention weights
+            attention_weights = F.softmax(masked_scores, dim=-1)  # [B, N]
+            
+            # Handle edge case: all modalities masked -> uniform (though should not happen)
+            attention_weights = torch.nan_to_num(attention_weights, nan=0.0)
+            
+            # 4. Weighted sum to get Hybrid Anchor
+            hybrid_anchor = torch.einsum('bn,bnd->bd', attention_weights, summary_vectors)  # [B, D]
+            hybrid_anchor = hybrid_anchor.unsqueeze(1)  # [B, 1, D]
+            
+            # 5. Refinement: Hybrid Anchor attends to all summaries
+            key_padding_mask = (modality_mask == 0)
+            refined, _ = self.refine_attn(
+                query=hybrid_anchor,
+                key=summary_vectors,
+                value=summary_vectors,
+                key_padding_mask=key_padding_mask,
+            )
+            refined = self.refine_ln(hybrid_anchor + refined)
+            refined = self.output_ln(refined + self.refine_ffn(refined))
+            
+            global_query = refined.squeeze(1)  # [B, D]
+            return global_query, attention_weights
+            
+        # ==================== AUDIO (Legacy) ====================
+        elif self.strategy == 'audio':
+            # Extract Audio Anchor
+            audio_anchor = summary_vectors[:, audio_idx:audio_idx+1, :]  # [B, 1, H]
+            
+            # EDGE CASE: Audio is masked
+            # Risk: If audio_idx is masked, attention output may be unstable.
+            # Mitigation: Return zero vector but preserve gradient flow.
+            audio_present = modality_mask[:, audio_idx:audio_idx+1]  # [B, 1]
+            
+            evidence_bank = summary_vectors
+            key_padding_mask = (modality_mask == 0)
+            
+            attn_out, attn_weights_raw = self.cross_attn(
+                query=audio_anchor,
+                key=evidence_bank,
+                value=evidence_bank,
+                key_padding_mask=key_padding_mask,
+            )
+            
+            x = self.ln(audio_anchor + attn_out)
+            x = self.output_ln(x + self.ffn(x))
+            
+            global_query = x.squeeze(1)  # [B, D]
+            
+            # Zero out if audio was masked (prevent NaN propagation)
+            global_query = global_query * audio_present
+            
+            attention_weights = attn_weights_raw.squeeze(1)  # [B, N]
+            return global_query, attention_weights
+            
+        # ==================== CONCAT (Baseline) ====================
+        elif self.strategy == 'concat':
+            # Mask missing modalities with zeros
+            masked_summaries = summary_vectors * modality_mask.unsqueeze(-1)
+            
+            # Flatten and project
+            concat_feat = masked_summaries.view(batch_size, -1)  # [B, N*D]
+            
+            # Pad if fewer experts than max_experts
+            if num_experts < self.max_experts:
+                pad_size = (self.max_experts - num_experts) * self.hidden_dim
+                concat_feat = F.pad(concat_feat, (0, pad_size))
+            
+            global_query = self.concat_proj(concat_feat)  # [B, D]
+            global_query = self.output_ln(global_query)
+            
+            # Attention weights: uniform (or based on mask)
+            attention_weights = modality_mask / (modality_mask.sum(dim=-1, keepdim=True) + 1e-8)
+            
+            return global_query, attention_weights
         
-        # Residual + Norm
-        x = self.ln(audio_anchor + attn_out)
-        
-        # FFN
-        x = self.output_ln(x + self.ffn(x))
-        
-        # Squeeze to get global query vector [B, H]
-        global_query = x.squeeze(1)
-        
-        # Attention weights [B, 1, N] -> [B, N]
-        expert_attention = attn_weights.squeeze(1)
-        
-        return global_query, expert_attention
+        # Should never reach here
+        raise RuntimeError(f"Unknown strategy: {self.strategy}")
 
 
 class PanoramicGuidedAttention(nn.Module):
@@ -235,7 +354,10 @@ class PanoramicGuidedAttention(nn.Module):
 
 class EvidenceIntegrationLayer(nn.Module):
     """
-    Evidence Integration Layer with Audio-Guided Attention.
+    Evidence Integration Layer with Adaptive Query Generation.
+    
+    Args:
+        query_strategy: Strategy for global query generation ('dynamic', 'audio', 'concat').
     """
     
     def __init__(
@@ -246,17 +368,20 @@ class EvidenceIntegrationLayer(nn.Module):
         num_output_queries: int = 64,
         max_experts: int = 6,
         dropout: float = 0.1,
+        query_strategy: str = 'dynamic',
     ):
         super().__init__()
         
         self.modality_order = ['vis_global', 'vis_motion', 'audio', 'au', 'text', 'synergy']
+        self.query_strategy = query_strategy
         
-        # Audio Guided Query Generator
-        self.query_generator = AudioGuidedQueryGenerator(
+        # Adaptive Query Generator (supports multiple strategies)
+        self.query_generator = AdaptiveQueryGenerator(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             max_experts=max_experts,
             dropout=dropout,
+            strategy=query_strategy,
         )
         
         # Panoramic guided attention
@@ -275,14 +400,16 @@ class EvidenceIntegrationLayer(nn.Module):
         modality_mask: Optional[torch.Tensor] = None,
     ) -> IntegrationOutput:
         
-        # Identify Audio Index
-        audio_idx = 2 # Default position in order
+        # Identify Audio Index (for 'audio' strategy fallback)
+        audio_idx = 2
         if 'audio' in self.modality_order:
-             audio_idx = self.modality_order.index('audio')
+            audio_idx = self.modality_order.index('audio')
              
-        # Generate global query (Audio Guided)
+        # Generate global query (Adaptive)
         global_query, expert_attention = self.query_generator(
-            summary_vectors, audio_idx, modality_mask
+            summary_vectors=summary_vectors,
+            modality_mask=modality_mask,
+            audio_idx=audio_idx,
         )
         
         # Build K-bank

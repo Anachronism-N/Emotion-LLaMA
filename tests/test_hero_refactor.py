@@ -4,7 +4,7 @@ import sys
 import unittest
 
 from minigpt4.models.hero.observation_experts import ObservationExpertLayer, ModalityQFormer, SynergyExpert
-from minigpt4.models.hero.integration_layer import EvidenceIntegrationLayer, PanoramicGuidedAttention, AudioGuidedQueryGenerator, ModalityDropoutTrainer
+from minigpt4.models.hero.integration_layer import EvidenceIntegrationLayer, PanoramicGuidedAttention, AdaptiveQueryGenerator, ModalityDropoutTrainer
 from minigpt4.models.hero.hero_model import HEROModel
 
 class TestHEROModules(unittest.TestCase):
@@ -89,8 +89,8 @@ class TestHEROModules(unittest.TestCase):
         self.assertEqual(output.integrated_context.shape, (self.batch_size, 64, self.llm_dim))
         
         # Check if Audio-Guided Query Generator is working
-        self.assertIsInstance(layer.query_generator, AudioGuidedQueryGenerator)
-        print("   ✓ Used AudioGuidedQueryGenerator")
+        self.assertIsInstance(layer.query_generator, AdaptiveQueryGenerator)
+        print("   ✓ Used AdaptiveQueryGenerator (strategy: dynamic)")
         
         print("   ✓ EvidenceIntegrationLayer test passed!")
 

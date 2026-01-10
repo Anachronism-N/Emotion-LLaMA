@@ -14,7 +14,7 @@ from minigpt4.models.hero.observation_experts import (
 
 from minigpt4.models.hero.integration_layer import (
     EvidenceIntegrationLayer,
-    AudioGuidedQueryGenerator,
+    AdaptiveQueryGenerator,
     PanoramicGuidedAttention,
     ModalityDropoutTrainer,
     IntegrationOutput,
@@ -35,7 +35,7 @@ __all__ = [
     
     # Integration Layer
     "EvidenceIntegrationLayer",
-    "AudioGuidedQueryGenerator",
+    "AdaptiveQueryGenerator",
     "PanoramicGuidedAttention",
     "ModalityDropoutTrainer",
     "IntegrationOutput",
