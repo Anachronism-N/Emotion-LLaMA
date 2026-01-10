@@ -101,6 +101,38 @@
 3.  **LLM 词表对齐**:
     *   *现状*: 使用标准 LLaMA Tokenizer。
     *   *风险*: 情感相关的专用词汇（如微表情术语）可能被切分得太碎。
+---
+
+## 附录：Git 提交流程 (Git Operations Guide)
+
+为了规范代码提交并确保远程仓库同步，请遵循以下步骤：
+
+### 1. 检查状态 (Review Changes)
+在提交前，确认当前修改的文件：
+```bash
+git status
+```
+
+### 2. 暂存更改 (Stage Changes)
+将修改后的代码添加到暂存区。建议排除 `__pycache__` 等临时文件（已由 `.gitignore` 处理）：
+```bash
+git add .
+```
+
+### 3. 提交记录 (Commit)
+编写简洁明了的提交信息，描述核心变更：
+```bash
+git commit -m "Your descriptive message here"
+```
+
+### 4. 推送到远程 (Push)
+将本地 `main` 分支推送到 GitHub 上的 `origin`：
+```bash
+git push origin main
+```
+
+> [!TIP]
+> **关于环境**: 提交前建议先运行 `tests/test_hero_refactor.py` 确保核心逻辑未被损坏。
 
 4.  **Batch Size 限制**:
     *   *现状*: 只是 Feature-Only，显存占用仍较大 (Q-Former * 6 + LLM)。可能需要使用 Gradient Checkpointing 或 LoRA (已计划)。
