@@ -122,3 +122,163 @@ class SCCL_Loss(nn.Module):
         loss_t2i = F.cross_entropy(logits.T, targets)
         
         return (loss_i2t + loss_t2i) / 2
+
+
+class MultiModalContrastiveLoss(nn.Module):
+    """
+    Multi-Modal Contrastive Alignment Loss.
+    
+    Performs contrastive learning between all specified modality pairs to
+    build a more unified feature space.
+    
+    Default pairs:
+        - Audio-Text: Align speech prosody with transcription semantics
+        - Visual-Audio: Align facial expressions with voice
+        - AU-Text: Align facial action units with emotion descriptions
+    
+    Args:
+        temperature: Softmax temperature for contrastive loss.
+        modality_pairs: List of (modality1, modality2) tuples to align.
+    """
+    
+    DEFAULT_PAIRS = [
+        ('audio', 'text'),
+        ('vis_global', 'audio'), 
+        ('au', 'text'),
+        ('vis_motion', 'audio'),
+    ]
+    
+    def __init__(
+        self, 
+        temperature: float = 0.07,
+        modality_pairs: Optional[list] = None,
+    ):
+        super().__init__()
+        self.temperature = temperature
+        self.modality_pairs = modality_pairs or self.DEFAULT_PAIRS
+        
+    def forward(
+        self, 
+        modal_features: dict,  # {'audio': [B, D], 'text': [B, D], ...}
+    ) -> Tuple[torch.Tensor, dict]:
+        """
+        Compute contrastive loss across all modality pairs.
+        
+        Args:
+            modal_features: Dictionary mapping modality names to feature tensors.
+                           Each tensor should be [Batch, Dim].
+                           
+        Returns:
+            total_loss: Averaged loss across all valid pairs.
+            pair_losses: Dictionary of losses per pair for logging.
+        """
+        pair_losses = {}
+        valid_pairs = 0
+        total_loss = 0.0
+        
+        for m1, m2 in self.modality_pairs:
+            if m1 not in modal_features or m2 not in modal_features:
+                continue
+                
+            feat1 = modal_features[m1]
+            feat2 = modal_features[m2]
+            
+            # Skip if batch size mismatch
+            if feat1.size(0) != feat2.size(0):
+                continue
+                
+            # Normalize features
+            feat1 = F.normalize(feat1, dim=-1)
+            feat2 = F.normalize(feat2, dim=-1)
+            
+            # Compute similarity matrix
+            logits = torch.matmul(feat1, feat2.T) / self.temperature
+            
+            # InfoNCE loss (symmetric)
+            batch_size = feat1.size(0)
+            labels = torch.arange(batch_size, device=feat1.device)
+            
+            loss_1to2 = F.cross_entropy(logits, labels)
+            loss_2to1 = F.cross_entropy(logits.T, labels)
+            
+            pair_loss = (loss_1to2 + loss_2to1) / 2
+            pair_losses[f'{m1}-{m2}'] = pair_loss.item()
+            
+            total_loss += pair_loss
+            valid_pairs += 1
+        
+        if valid_pairs > 0:
+            total_loss = total_loss / valid_pairs
+        else:
+            # Return zero loss if no valid pairs
+            device = next(iter(modal_features.values())).device
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            
+        return total_loss, pair_losses
+
+
+class ModalityEntropyRegularizer(nn.Module):
+    """
+    Modality Importance Regularization via Entropy.
+    
+    Encourages the AdaptiveQueryGenerator to use information from all
+    available modalities rather than over-relying on a single one.
+    
+    Uses entropy of attention weights as a regularization term:
+    H(weights) = -sum(w * log(w))
+    
+    High entropy = uniform distribution (desired)
+    Low entropy = concentrated on few modalities (penalized)
+    
+    Args:
+        min_entropy_ratio: Minimum acceptable entropy as ratio of max entropy.
+                          Values below this ratio incur a penalty.
+        penalty_scale: Scale factor for the penalty.
+    """
+    
+    def __init__(
+        self, 
+        min_entropy_ratio: float = 0.5,
+        penalty_scale: float = 1.0,
+    ):
+        super().__init__()
+        self.min_entropy_ratio = min_entropy_ratio
+        self.penalty_scale = penalty_scale
+        
+    def forward(
+        self, 
+        attention_weights: torch.Tensor,  # [B, N_modalities]
+        modality_mask: Optional[torch.Tensor] = None,  # [B, N_modalities]
+    ) -> torch.Tensor:
+        """
+        Compute entropy regularization penalty.
+        
+        Args:
+            attention_weights: Attention weights from AdaptiveQueryGenerator.
+            modality_mask: Optional mask indicating available modalities.
+            
+        Returns:
+            Penalty term (to be added to total loss).
+        """
+        # Compute entropy per sample
+        log_weights = torch.log(attention_weights + 1e-8)
+        entropy = -(attention_weights * log_weights).sum(dim=-1)  # [B]
+        
+        # Compute maximum possible entropy
+        if modality_mask is not None:
+            # Max entropy depends on number of available modalities per sample
+            num_available = modality_mask.sum(dim=-1).clamp(min=1)
+            max_entropy = torch.log(num_available)
+        else:
+            num_modalities = attention_weights.size(-1)
+            max_entropy = torch.log(torch.tensor(
+                num_modalities, dtype=torch.float, device=attention_weights.device
+            ))
+        
+        # Compute entropy ratio
+        entropy_ratio = entropy / (max_entropy + 1e-8)
+        
+        # Penalize if ratio is below threshold
+        penalty = F.relu(self.min_entropy_ratio - entropy_ratio)
+        
+        return self.penalty_scale * penalty.mean()

@@ -19,12 +19,32 @@
 | 阶段 | 状态 | 说明 |
 |:-----|:----:|:-----|
 | Phase 0: 环境搭建与基线理解 | ✅ 完成 | AU 特征接入已实现 |
-| Phase 1: 观测专家层扩展 | 🔄 进行中 | Q-Former 待实现 |
-| Phase 2: 证据整合层实现 | ⏳ 待开始 | - |
-| Phase 3: 分层推理层改造 | ⏳ 待开始 | - |
-| Phase 4: 训练与评估 | ⏳ 待开始 | - |
+| Phase 1: 观测专家层扩展 | ✅ 完成 | 6 Experts + EvidenceDecoder |
+| Phase 2: 证据整合层实现 | ✅ 完成 | **AdaptiveQueryGenerator** (3 strategies) |
+| Phase 3: 分层推理层改造 | ✅ 完成 | CoT Prompt + Structured Output |
+| Phase 4: 训练与评估 | 🟡 就绪 | Feature Extraction Script Ready |
+| **Phase 5: 优化与扩展** | ✅ 完成 | 见下方已完成功能列表 |
+| **Phase 6: 进阶功能** | ⏳ 待规划 | Multi-Scale Fusion, Augmentation |
+
+#### Phase 5 已完成功能清单
+
+| 功能 | 文件位置 | 说明 |
+|:-----|:--------|:-----|
+| Evidence Imputation | `evidence_imputation.py` | 缺失模态估计与置信度输出 |
+| Temperature Scaling | `integration_layer.py` | 可学习温度参数 |
+| MultiModal Contrastive Loss | `hero_loss.py` | 4 对模态对比学习 |
+| Modality Entropy Regularizer | `hero_loss.py` | 防止单模态过度依赖 |
+| Interpretability Module | `interpretability.py` | 可视化 + CoT 日志 |
+| Smart Gradient Checkpointing | `optimization_utils.py` | 冻结 Encoder 兼容 |
+| FlashAttention V2 / SDPA | `optimization_utils.py` | 高效注意力计算 |
+| QLoRA Setup | `optimization_utils.py` | 4-bit 量化 + LoRA |
+| Mixed Precision (AMP) | `optimization_utils.py` | BFloat16 训练 |
+| torch.compile | `optimization_utils.py` | PyTorch 2.x 编译优化 |
+| **Distributed Training** | `distributed.py` | DDP, FSDP, DeepSpeed |
+| **Distributed Inference** | `distributed.py` | 多 GPU 推理引擎 |
 
 ---
+
 
 ## 🏗️ 详细实施计划
 
@@ -279,4 +299,46 @@ Emotion-LLaMA/
 
 ---
 
-*最后更新: 2026-01-09*
+*最后更新: 2026-01-10*
+
+---
+
+## 🚀 Phase 5: 优化与扩展计划 (未实现功能 & 潜在改进)
+
+本节基于 `Idea.md` 与当前实现的对齐检查结果，列出尚未实现的功能以及可优化方向。
+
+### 5.1 未实现功能 (Gap Analysis)
+
+| 功能 | Idea.md 位置 | 当前状态 | 优先级 |
+| :--- | :--- | :--- | :--- |
+| **显式证据补全 (Evidence Imputation)** | Line 188 | 未实现 | 🔴 高 |
+| **EvidenceDecoder 的细粒度文本训练数据** | Pillar 1 | 缺少监督信号 | 🔴 高 |
+| **OpenFace AU 特征实时集成** | Pillar 1 | Placeholder (Zeros) | 🟡 中 |
+| **LLM 情感词汇扩展 (Tokenizer)** | Pillar 3 | 使用默认 LLaMA | 🟢 低 |
+
+### 5.2 可优化方向 (Optimization Proposals)
+
+#### A. 动态阈值更新 (Dynamic Threshold for Scorer)
+*   **现状**: `AdaptiveQueryGenerator (dynamic)` 中的 Scorer 输出的是绝对分数。
+*   **优化**: 引入 **Temperature Scaling** (如 `softmax(scores / T)`) 或者 **Top-K Gating**，允许模型只关注前 K 个最信任的模态。
+*   **预期收益**: 提升在极端噪声场景下的鲁棒性。
+
+#### B. 梯度检查点 (Gradient Checkpointing for Memory)
+*   **现状**: 6 个 Q-Former + LLM 可能导致显存打满。
+*   **优化**: 在 `ModalityQFormer` 和 `HEROModel` 中启用 `torch.utils.checkpoint.checkpoint` 来换时间与内存。
+*   **预期收益**: Batch Size 可以增加 2-3 倍。
+
+#### C. LoRA 微调集成
+*   **现状**: LLM 全参数训练。
+*   **优化**: 集成 PEFT 库，对 LLM 的 QKV 层应用 LoRA。
+*   **预期收益**: 训练时间缩短 40% 以上，显存占用降低。
+
+#### D. 证据补全模块 (Implement Evidence Imputation)
+*   **现状**: 未实现。
+*   **实现方案**:
+    1.  训练一个轻量级 Transformer Decoder，以其他模态的 Summary 为输入。
+    2.  输出: 缺失模态的估计 Summary 向量。
+    3.  可还可以输出说明文本，如 `[IAE-01]: 推断音频情感上扬`。
+*   **训练数据**: 使用 Modality Dropout 生成的 (Teacher-Output, Dropped-Input) 对进行监督。
+
+---

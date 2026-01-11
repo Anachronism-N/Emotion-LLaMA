@@ -56,6 +56,8 @@ class AdaptiveQueryGenerator(nn.Module):
         max_experts: int = 6,
         dropout: float = 0.1,
         strategy: str = 'dynamic',
+        temperature: float = 1.0,
+        learnable_temperature: bool = False,
     ):
         super().__init__()
         
@@ -65,6 +67,12 @@ class AdaptiveQueryGenerator(nn.Module):
         self.hidden_dim = hidden_dim
         self.max_experts = max_experts
         self.strategy = strategy
+        
+        # Temperature scaling for attention distribution control
+        if learnable_temperature:
+            self.temperature = nn.Parameter(torch.tensor(temperature))
+        else:
+            self.register_buffer('temperature', torch.tensor(temperature))
         
         # ========== Strategy: Dynamic ==========
         if strategy == 'dynamic':
@@ -149,8 +157,9 @@ class AdaptiveQueryGenerator(nn.Module):
             # 1. Score each modality
             scores = self.scorer(summary_vectors).squeeze(-1)  # [B, N]
             
-            # 2. Mask missing modalities with -inf before softmax
-            masked_scores = scores.masked_fill(modality_mask == 0, float('-inf'))
+            # 2. Apply temperature scaling and mask missing modalities
+            scaled_scores = scores / self.temperature
+            masked_scores = scaled_scores.masked_fill(modality_mask == 0, float('-inf'))
             
             # 3. Softmax to get attention weights
             attention_weights = F.softmax(masked_scores, dim=-1)  # [B, N]
@@ -354,10 +363,13 @@ class PanoramicGuidedAttention(nn.Module):
 
 class EvidenceIntegrationLayer(nn.Module):
     """
-    Evidence Integration Layer with Adaptive Query Generation.
+    Evidence Integration Layer with Adaptive Query Generation and Evidence Imputation.
     
     Args:
         query_strategy: Strategy for global query generation ('dynamic', 'audio', 'concat').
+        enable_imputation: Whether to enable missing modality imputation.
+        temperature: Temperature for attention score scaling.
+        learnable_temperature: Whether temperature is a learnable parameter.
     """
     
     def __init__(
@@ -369,11 +381,16 @@ class EvidenceIntegrationLayer(nn.Module):
         max_experts: int = 6,
         dropout: float = 0.1,
         query_strategy: str = 'dynamic',
+        enable_imputation: bool = True,
+        temperature: float = 1.0,
+        learnable_temperature: bool = False,
     ):
         super().__init__()
         
         self.modality_order = ['vis_global', 'vis_motion', 'audio', 'au', 'text', 'synergy']
         self.query_strategy = query_strategy
+        self.enable_imputation = enable_imputation
+        self.hidden_dim = hidden_dim
         
         # Adaptive Query Generator (supports multiple strategies)
         self.query_generator = AdaptiveQueryGenerator(
@@ -382,7 +399,22 @@ class EvidenceIntegrationLayer(nn.Module):
             max_experts=max_experts,
             dropout=dropout,
             strategy=query_strategy,
+            temperature=temperature,
+            learnable_temperature=learnable_temperature,
         )
+        
+        # Evidence Imputation Module (for handling missing modalities)
+        if enable_imputation:
+            from minigpt4.models.hero.evidence_imputation import EvidenceImputationModule
+            self.imputation_module = EvidenceImputationModule(
+                hidden_dim=hidden_dim,
+                num_modalities=max_experts,
+                num_layers=2,
+                num_heads=num_heads,
+                dropout=dropout,
+            )
+        else:
+            self.imputation_module = None
         
         # Panoramic guided attention
         self.panoramic_attention = PanoramicGuidedAttention(
@@ -399,6 +431,38 @@ class EvidenceIntegrationLayer(nn.Module):
         summary_vectors: torch.Tensor,
         modality_mask: Optional[torch.Tensor] = None,
     ) -> IntegrationOutput:
+        
+        batch_size, num_experts, hidden_dim = summary_vectors.shape
+        device = summary_vectors.device
+        
+        # Default mask: all modalities present
+        if modality_mask is None:
+            modality_mask = torch.ones(batch_size, num_experts, device=device)
+        
+        # ========== Evidence Imputation for missing modalities ==========
+        if self.enable_imputation and self.imputation_module is not None:
+            # Detect missing modalities (where all samples in batch have mask=0)
+            modality_presence = modality_mask.sum(dim=0)  # [num_experts]
+            missing_indices = (modality_presence == 0).nonzero(as_tuple=True)[0].tolist()
+            available_indices = (modality_presence > 0).nonzero(as_tuple=True)[0].tolist()
+            
+            if len(missing_indices) > 0 and len(available_indices) > 0:
+                # Extract available summaries
+                available_summaries = summary_vectors[:, available_indices, :]
+                
+                # Impute missing modalities
+                imputation_output = self.imputation_module(
+                    available_summaries=available_summaries,
+                    available_indices=available_indices,
+                    missing_indices=missing_indices,
+                )
+                
+                # Merge imputed summaries back into summary_vectors
+                imputed = imputation_output.imputed_summaries  # [B, N_miss, D]
+                for i, miss_idx in enumerate(missing_indices):
+                    summary_vectors[:, miss_idx, :] = imputed[:, i, :]
+                    # Update mask to reflect imputed modalities (with lower confidence)
+                    modality_mask[:, miss_idx] = imputation_output.confidence_scores[:, i]
         
         # Identify Audio Index (for 'audio' strategy fallback)
         audio_idx = 2

@@ -162,9 +162,26 @@ HERO由三大核心支柱模块构成，形成一条“**观察 → 整合 → �
 
   1. **全景动态引导注意力 (Panoramic Dynamic Guided Attention)**
 
-  *Audio-Guided Fusion* 文中直接使用了音频作为引导，此处我们使用上一层协同专家的 $$T_{synergy}$$来作为引导其实也可以，且理论上效果会由于仅仅使用音频。但是还是可能被质疑，包括为什么选择这两种模态进行融合并作为query等等。为了生成一个比 $$T_{audio}$$ 或局部 $$T_{synergy}$$ 更合理的 Query，我们分两步走：
+  为了生成一个比固定使用 $$T_{audio}$$ 或局部 $$T_{synergy}$$ 更合理、更鲁棒的 Query，我们实现了 **自适应查询生成器 (`AdaptiveQueryGenerator`)**，支持三种策略：
 
-  * **模态缺失下的双轨鲁棒性机制:**
+  *   **`dynamic` (默认/推荐)**: **动态锚定 (Dynamic Anchoring)**。
+      1.  **门控打分 (Gated Scoring)**: 使用一个轻量级 MLP (`Linear -> Tanh -> Linear`) 对每个模态的 Summary 向量计算置信度分数。
+      2.  **Mask 处理**: 在 Softmax 之前，将缺失模态的分数填充为 `-inf`，确保其权重为 0。
+      3.  **Hybrid Anchor 生成**: 通过加权求和生成混合锚点向量。
+      4.  **Self-Attention Refinement**: 混合锚点作为 Query，参与一次 Self-Attention (Q=Anchor, K=V=Summaries)，进行上下文微调，最终输出 $$Q_{global}$$。
+      *   *优势*: 模型自动学习哪种模态在当前场景下最可靠，无需人工预设。
+
+  *   **`audio` (传统/对照)**: **音频锚定 (Audio Anchoring)**。
+      *   强制选取 Audio 对应的向量作为 Query，Cross-Attend 所有其他模态。
+      *   *适用场景*: 当已知音频总是最可靠的情感线索时（如无遮挡的语音通话）。
+
+  *   **`concat` (基线)**: **直接拼接 (Concatenation Baseline)**。
+      *   将所有模态的 Summary 在特征维度拼接，通过 MLP 映射回 `hidden_dim`。
+      *   *适用场景*: 作为消融实验的对照组，验证注意力机制的增益。
+
+  > **实现代码**: `minigpt4/models/hero/integration_layer.py` 中的 `AdaptiveQueryGenerator` 类。
+
+  2. **模态缺失下的双轨鲁棒性机制:**
 
     * **训练时 - 隐式表征对齐 (Implicit Representation Alignment):** 引入一个并行的“多模态融合专家”**作为“教师模型”。在训练中通过**模态丢弃 (Modality Dropout) 随机模拟信息不全的场景，并增加一个**KL散度损失** `L_KL = KL(P_teacher || Q_student)`，强迫模型在输入不全时，也要在特征空间中“脑补”出与“教师”看到全部信息时尽可能相似的表示。
 
